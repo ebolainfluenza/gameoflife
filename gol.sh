@@ -7,5 +7,4 @@ mkdir images
 go test -race
 go build -race
 go install -race
-time go run hlife3e.go -r 64 -c 64 -x 620 -y 620
-
+time go run gol.go -r 64 -c 64 -x 620 -y 620
