@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/md5"
 	"crypto/rand"
 	"flag"
 	"fmt"
@@ -14,39 +13,45 @@ import (
 	"strconv"
 )
 
-type Generation struct {
-	isAlive bool
+/// TODO:
+// 		- each generation has an array of unsigned int64 with enough bits to hold all rows*cols
+// 		- each cell has a single bit in the array
+// 		- each cell has eight neighboring bits in the array
+// 		- neighbor array should be an [8]unsigned int64 whose values are the indices in the rows/cols array of the neighbors
+// 		- each cell in each generation must check its neighbor bits to see if it's alive
+// 		- each cell in each generation must set its bit if it's alive
+// 		- checking for duplicates means looping through each index in the rows/cols array comparing it against previous generations by simple equality
+
+type bits []uint64
+
+type generation struct {
+	bits    // an array of bits large to hold this generation's grid
+	isalive bool
 	count   int /* alive neighbors */
 }
 
 type Cell struct {
-	neighbors [8]*Cell
-	gens      []*Generation /* successive generations of this cell */
-	bounds    image.Rectangle
-	generate  chan int64 /* receive generation to run from the pump */
+	neighbors   [8]*Cell
+	thisGen     *generation
+	prevGen     *generation
+	bounds      image.Rectangle
+	generations chan int /* receive generation to run from the pump */
 }
 
-type GridReq struct {
-	i     int64            /* generation index */
+type gridreq struct {
+	i     int              /* generation index */
 	imgch chan *image.RGBA /* accepts latest image, updates, then hands back */
 }
 
-type MyColor color.RGBA
+type mycolor color.RGBA
 
-var bc = MyColor{0xff, 0xff, 0xff, 0xff} /* default background color: white */
-var gc = MyColor{0xf0, 0xf0, 0xf0, 0xff} /* default grid color: light grey */
-var cc = MyColor{0x0, 0xff, 0x0, 0xff}   /* default cell color: green */
+var bc = mycolor{0xff, 0xff, 0xff, 0xff} /* default background color: white */
+var gc = mycolor{0xf0, 0xf0, 0xf0, 0xff} /* default grid color: light grey */
+var cc = mycolor{0x0, 0xff, 0x0, 0xff}   /* default cell color: green */
+var imgx, imgy = 620, 620                /* default image height & width in pixels */
+var rows, cols = 64, 64                  /* default number of rows & columns in grid */
 
-var imgx, imgy = 620, 620 /* default image height & width constraints */
-
-var rows, cols = 64, 64
 var cells [][]Cell
-
-const cbuflen = 6        /* max period for repeat patterns */
-var cbuf [cbuflen][]byte /* circular buffer of md5 sums */
-var cbufi int            /* where current generation's md5 sum is stored */
-
-var sss int64 = 1024 /* slice start size */
 
 func rc(r, c int) *Cell { /* constrain in board: wrap */
 	if r < 0 {
@@ -62,7 +67,7 @@ func rc(r, c int) *Cell { /* constrain in board: wrap */
 	return &cells[r][c]
 }
 
-func initialize(done chan int64, gridch chan *GridReq) {
+func initialize(done chan int, gridch chan *gridreq) {
 	cells = make([][]Cell, rows)
 	for r := range cells {
 		cells[r] = make([]Cell, cols)
@@ -105,11 +110,15 @@ func initialize(done chan int64, gridch chan *GridReq) {
 				rc(r+1, c-1), rc(r+1, c), rc(r+1, c+1),
 			}
 			cell.bounds = image.Rect(x+1, y+1, x+cw-1, y+rh-1)
-			cell.generate = make(chan int64)
+			cell.generations = make(chan int)
 			alive := b[r*cols+c]&0xa == 0xa
-			cell.gens = make([]*Generation, sss)
-			cell.gens[0] = &Generation{isAlive: alive, count: 0}
-			go cell.live(alive, biota, done, gridch)
+			size := uint64(rows*cols) / 64
+			if size%64 != 0 {
+				size++
+			}
+			cell.prevGen = nil
+			cell.thisGen = &generation{bits: make([]uint64, size), isalive: alive, count: 0}
+			go cell.live(biota, done, gridch, size)
 			x += cw
 			draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, image.Point{}, draw.Over)
 			x += 1
@@ -118,70 +127,62 @@ func initialize(done chan int64, gridch chan *GridReq) {
 		draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, image.Point{}, draw.Over)
 		y += 1
 	}
-	go gridGen(grid, gridch)
+	go gridgen(grid, gridch)
 }
 
-func (c *MyColor) Set(s string) error {
+func (v *mycolor) Set(s string) error {
 	i64, err := strconv.ParseInt(s, 0, 32)
 	r := uint8(i64 >> 24 & 0xff)
 	g := uint8(i64 >> 16 & 0xff)
 	b := uint8(i64 >> 8 & 0xff)
 	a := uint8(i64 & 0xff)
-	*c = MyColor{r, g, b, a}
+	*v = mycolor{r, g, b, a}
 	return err
 }
 
-func (c *MyColor) String() string {
+func (v *mycolor) String() string {
 	return fmt.Sprintf("{ red: %#x, green: %#x, blue: %#x, alpha: %#x }",
-		c.R, c.G, c.B, c.A)
+		(*v).R, (*v).G, (*v).B, (*v).A)
 }
 
-// gridGen receives requests for the current grid image from cells (and drawImg()),
-// and passes the current image to the next cell that is ready to draw onto it.
-func gridGen(grid draw.Image, gridch chan *GridReq) {
+func gridgen(grid draw.Image, gridch chan *gridreq) {
 	b := grid.Bounds()
-	imgarr := make([]*image.RGBA, sss)
+	imgarr := make([]*image.RGBA, 256)
 	for r := range gridch {
-		if r.i >= int64(len(imgarr)) {
+		if r.i >= len(imgarr) {
 			tmp := make([]*image.RGBA, 2*len(imgarr))
 			imgarr = append(imgarr, tmp...)
 		}
-		// the 1st cell to draw this new generation will have an empty/nil image
 		if imgarr[r.i] == nil {
-			emptyGrid := image.NewRGBA(b)
-			draw.Draw(emptyGrid, b, grid, image.Point{}, draw.Src)
-			imgarr[r.i] = emptyGrid
+			gridcp := image.NewRGBA(b)
+			draw.Draw(gridcp, b, grid, b.Min, draw.Src)
+			imgarr[r.i] = gridcp
 		}
 		r.imgch <- imgarr[r.i]  /* pass this cell the latest grid */
 		imgarr[r.i] = <-r.imgch /* wait for this cell update it & hand it back */
 	}
 }
 
-// Cell.live is the lifetime of a cell.  It loops through each generation,
-// and if it's alive in this generation, it draws itself on the current image.
-func (cell *Cell) live(alive bool, biota *image.RGBA, done chan int64, gridch chan *GridReq) {
+func (cell *Cell) live(biota *image.RGBA, done chan int, gridch chan *gridreq, size uint64) {
 	imgch := make(chan *image.RGBA)
-	for i := range cell.generate {
-		gridch <- &GridReq{i, imgch}
+	for i := range cell.generations {
+		gridch <- &gridreq{i, imgch}
 		dest := <-imgch /* get the latest image on which to draw */
-		if i >= int64(len(cell.gens)) {
-			tmp := make([]*Generation, 2*len(cell.gens))
-			cell.gens = append(cell.gens, tmp...)
-		}
-		if i > 0 {
-			cell.gens[i] = &Generation{isAlive: false, count: 0}
-			pg := cell.gens[i-1] /* previous generation */
-			for k := range cell.neighbors {
-				if cell.neighbors[k].gens[i-1].isAlive {
-					pg.count++
+		if cell.prevGen != nil {
+			cell.thisGen = &generation{bits: make([]uint64, size), isalive: false, count: 0}
+			if i > 0 {
+				pg := cell.prevGen
+				for k := range cell.neighbors {
+					if cell.neighbors[k].prevGen.isalive {
+						pg.count++
+					}
+				}
+				if (pg.isalive && (pg.count == 2 || pg.count == 3)) || (pg.isalive == false && pg.count == 3) {
+					cell.thisGen.isalive = true /* stays alive or is born */
 				}
 			}
-			if (pg.isAlive && (pg.count == 2 || pg.count == 3)) ||
-				(pg.isAlive == false && pg.count == 3) {
-				cell.gens[i].isAlive = true /* stays alive or is born */
-			}
 		}
-		if cell.gens[i].isAlive {
+		if cell.thisGen.isalive {
 			draw.Draw(dest, cell.bounds, biota, image.Point{}, draw.Over)
 		}
 		imgch <- dest /* return the image with this cell updated */
@@ -191,85 +192,23 @@ func (cell *Cell) live(alive bool, biota *image.RGBA, done chan int64, gridch ch
 	imgch = nil
 }
 
-// drawImg grabs the current generation's final image, encodes the bits as a JPEG, and saves it
-// to a file.  It returns true if it's a duplicate of another image in the ring, false otherwise.
-func drawImg(i int64, gridch chan *GridReq) bool {
-	file := fmt.Sprintf("./images/life%d.jpg", i)
+func drawimg(i int, gridch chan *gridreq) error {
+	file := fmt.Sprintf("./images/%d.jpg", i)
 	f, err := os.Create(file)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer f.Close()
-	// here, we pretend we're a cell, grabbing the image,
-	// updating it (saving it to a file), then returning it
 	imgch := make(chan *image.RGBA)
-	gridch <- &GridReq{i, imgch}
-	pic := <-imgch /* get this generation's completed image */
-	err = jpeg.Encode(f, pic, nil)
-	if err != nil {
-		panic(err)
+	gridch <- &gridreq{i, imgch}
+	pic := <-imgch /* get this generation's image */
+	if err = jpeg.Encode(f, pic, nil); err != nil {
+		return err
 	}
 	imgch <- pic /* must return the image */
 	close(imgch)
 	f.Sync()
-	return isdup(f)
-}
-
-/* compares md5 sums of recent (pattern period of cbuflen) images for duplicates */
-func isdup(f *os.File) bool {
-	flen, err := f.Seek(0, 2)
-	if err != nil {
-		panic(err)
-	}
-	_, err = f.Seek(0, 0)
-	if err != nil {
-		panic(err)
-	}
-	b := make([]byte, flen)
-	n, err2 := f.Read(b)
-	if err2 != nil {
-		panic(err2)
-	}
-	if int64(n) != flen {
-		panic("bytes read != file length")
-	}
-	h := md5.New()
-	n, err = h.Write(b)
-	if err != nil {
-		panic(err)
-	}
-	if n != len(b) {
-		panic("n != len(b)")
-	}
-	sum := h.Sum(nil)
-	i := cbufi
-	for {
-		if cbuf[i] != nil {
-			dup := true
-			for j := 0; j < md5.Size; j++ {
-				if cbuf[i][j] != sum[j] {
-					dup = false
-					break
-				}
-			}
-			if dup {
-				return true
-			}
-		}
-		i--
-		if i < 0 {
-			i = cbuflen - 1
-		}
-		if i == cbufi { /* full circle */
-			break
-		}
-	}
-	cbuf[cbufi] = sum
-	cbufi++
-	if cbufi == cbuflen {
-		cbufi = 0
-	}
-	return false
+	return nil
 }
 
 func main() {
@@ -281,19 +220,20 @@ func main() {
 	flag.Var(&gc, "g", "grid color (default black)")
 	flag.Var(&cc, "z", "cell color (default green)")
 	flag.Parse()
-	done := make(chan int64)
-	gridch := make(chan *GridReq)
+	done := make(chan int) /* each cell responds when generation done */
+	gridch := make(chan *gridreq)
 	initialize(done, gridch)
-	for i := int64(0); i >= 0; i++ { /* the generation pump */
+	for i := 0; ; i++ { /* the pump */
 		for r := 0; r < rows; r++ {
 			for c := 0; c < cols; c++ {
-				cells[r][c].generate <- i
+				cells[r][c].generations <- i
 			}
 		}
 		for j := 0; j < rows*cols; j++ {
-			<-done // wait for all cells to make their mark
+			<-done
 		}
-		if drawImg(i, gridch) {
+		if err := drawimg(i, gridch); err != nil {
+			fmt.Printf("error: %s\n", err.Error())
 			break
 		}
 	}
@@ -301,7 +241,7 @@ func main() {
 	close(gridch)
 	for r := 0; r < rows; r++ {
 		for c := 0; c < cols; c++ {
-			close(cells[r][c].generate)
+			close(cells[r][c].generations)
 		}
 	}
 }
