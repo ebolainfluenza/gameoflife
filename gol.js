@@ -38,7 +38,7 @@ function autostep(timestamp) {
 	if (timestamp - ms > interval) {
 		ms = timestamp;
 		gen += 1;
-		document.getElementById("image").src = "./images/life" + gen + ".jpg";
+		document.getElementById("image").src = "./images/" + gen + ".jpg";
 	}
 	rid = requestAnimationFrame(autostep);
 }
@@ -59,7 +59,7 @@ function forward() {
 	dostop = false;
 	stepping = true;
 	gen += 1;
-	document.getElementById("image").src = "./images/life" + gen + ".jpg";
+	document.getElementById("image").src = "./images/" + gen + ".jpg";
 	rid = requestAnimationFrame(autostep);
 }
 
@@ -67,7 +67,7 @@ function backward() {
 	dostop = false;
 	stepping = true;
 	decgen();
-	document.getElementById("image").src = "./images/life" + gen + ".jpg";
+	document.getElementById("image").src = "./images/" + gen + ".jpg";
 	rid = requestAnimationFrame(autostep);
 }
 
@@ -78,6 +78,6 @@ function setinterval(num) {
 
 function fini() {
 	gen -= 1
-	document.getElementById("image").src = "./images/life" + gen + ".jpg";
+	document.getElementById("image").src = "./images/" + gen + ".jpg";
 	cancelAnimationFrame(rid);
 }
