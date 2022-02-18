@@ -219,7 +219,7 @@ func main() {
 	flag.IntVar(&imgy, "y", imgy, "image height")
 	flag.UintVar(&cycleDepth, "d", cycleDepth, "duplicate cycle depth")
 	flag.Var(&bc, "b", "background color (default white)")
-	flag.Var(&gc, "g", "grid color (default black)")
+	flag.Var(&gc, "g", "grid color (default grey)")
 	flag.Var(&cc, "z", "cell color (default green)")
 	flag.Parse()
 	cells := make([][]Cell, rows)
