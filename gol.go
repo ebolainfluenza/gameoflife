@@ -159,8 +159,8 @@ func (cell *Cell) live(biota *image.RGBA, isAlive bool) { //, prevGens []*Genera
 			isAlive = false
 			wasAlive := (pg.bits[cell.index] & cell.mask) == cell.mask /* this cell's previous gen */
 			if (wasAlive && (count == 2 || count == 3)) || (wasAlive == false && count == 3) {
-				isAlive = true                                /* stays alive or is born */
-				thisGen.bits[cell.index] |= uint64(cell.mask) /* set this cell's bit as alive */
+				isAlive = true                        /* stays alive or is born */
+				thisGen.bits[cell.index] |= cell.mask /* set this cell's bit as alive */
 			}
 		}
 		if isAlive { /* 1st gen has no prevGen, but must still be drawn */
