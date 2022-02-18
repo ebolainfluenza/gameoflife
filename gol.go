@@ -37,9 +37,6 @@ var rows, cols = 64, 64                  /* default number of rows & columns in 
 var cycleDepth uint = 7                  /* default number of previous generations to check for duplicates of current */
 var ZP = image.Point{}                   /* the image Zero Point, both X & Y are 0 (constant) */
 
-var cells [][]Cell
-var prevGens []*Generation
-
 func rc(cells [][]Cell, r, c int) *Cell { /* constrain in board: wrap */
 	if r < 0 {
 		r = rows - 1
@@ -62,7 +59,7 @@ func emptyGrid(grid *image.RGBA) *image.RGBA {
 	return img
 }
 
-func initialize(size uint64) (*image.RGBA, *Generation) { //, prevGens []*Generation
+func initialize(cells [][]Cell, prevGens *[]*Generation, bitsArrSize uint64) (*image.RGBA, *Generation) {
 	rh := (imgy - rows - 1) / rows
 	cw := (imgx - cols - 1) / cols
 	/* require 3 pixels for visibility's sake */
@@ -92,8 +89,8 @@ func initialize(size uint64) (*image.RGBA, *Generation) { //, prevGens []*Genera
 	y += 1
 	rndm := make([]byte, rows*cols)
 	io.ReadFull(rand.Reader, rndm)
-	thisGen := &Generation{geni: 0, bits: make([]uint64, size), image: emptyGrid(grid)}
-	cellno := uint(0)    /* 0 to (rows*cols)-1 */
+	thisGen := &Generation{geni: 0, bits: make([]uint64, bitsArrSize), image: emptyGrid(grid)}
+	cellno := uint64(0)  /* 0 to (rows*cols)-1 */
 	bitsIndex := uint(0) /* index into the Generation.bits array */
 	for r := 0; r < rows; r++ {
 		x = xoff + 1
@@ -102,11 +99,11 @@ func initialize(size uint64) (*image.RGBA, *Generation) { //, prevGens []*Genera
 			if cellno >= 64 && cellno%64 == 0 {
 				bitsIndex++
 			}
-			cell.index = bitsIndex             /* into the Generation.bits array */
-			cell.mask = 1 << uint64(cellno%64) /* of this cell's bit in the above index */
+			cell.index = bitsIndex         /* into the Generation.bits array */
+			cell.mask = 1 << (cellno % 64) /* of this cell's bit in the above index */
 			cell.neighbors = [8]*Cell{
 				rc(cells, r-1, c-1), rc(cells, r-1, c), rc(cells, r-1, c+1),
-				rc(cells, r, c-1) /* self */, rc(cells, r, c+1),
+				rc(cells, r, c-1) /*      self      */, rc(cells, r, c+1),
 				rc(cells, r+1, c-1), rc(cells, r+1, c), rc(cells, r+1, c+1),
 			}
 			cell.bounds = image.Rect(x+1, y+1, x+cw-1, y+rh-1)
@@ -117,7 +114,7 @@ func initialize(size uint64) (*image.RGBA, *Generation) { //, prevGens []*Genera
 				thisGen.bits[cell.index] |= cell.mask
 				isAlive = true
 			}
-			go cell.live(biota, isAlive) //, prevGens)
+			go cell.live(biota, prevGens, isAlive)
 			x += cw
 			draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Over)
 			x += 1
@@ -130,6 +127,8 @@ func initialize(size uint64) (*image.RGBA, *Generation) { //, prevGens []*Genera
 	return grid, thisGen
 }
 
+// MyColor.Set is a required function for the flags package.
+// MyColor.Set takes a hex-encoded string and sets the appropriate RGBA value.
 func (c *MyColor) Set(s string) error {
 	i64, err := strconv.ParseInt(s, 0, 32)
 	r := uint8(i64 >> 24 & 0xff)
@@ -140,14 +139,19 @@ func (c *MyColor) Set(s string) error {
 	return err
 }
 
+// MyColor.String is a required function for the flags package.
+// MyColor.String prints a RGBA formatted color representation.
 func (c *MyColor) String() string {
 	return fmt.Sprintf("{ red: %#x, green: %#x, blue: %#x, alpha: %#x }",
 		c.R, c.G, c.B, c.A)
 }
 
-func (cell *Cell) live(biota *image.RGBA, isAlive bool) { //, prevGens []*Generation) {
+// Cell.live is the go routine that represents this Cell's lifetime.
+// It is responsible for determining if it's alive this generation,
+// and for drawing itself on this generation's image.
+func (cell *Cell) live(biota *image.RGBA, prevGens *[]*Generation, isAlive bool) {
 	for thisGen := range cell.generations { /* get the latest image on which to draw */
-		pg := prevGens[0]
+		pg := (*prevGens)[0]
 		if pg != nil {
 			count := 0 /* of this cell's previous generation's alive neighbors */
 			for i := range cell.neighbors {
@@ -170,7 +174,9 @@ func (cell *Cell) live(biota *image.RGBA, isAlive bool) { //, prevGens []*Genera
 	}
 }
 
-func drawimg(geni int, thisGen *Generation) error { //gridch chan *GridReq) error {
+// drawImg creates a file for this generation's image.
+// It takes the in-memory image, and saves it as a .jpg in ./images/.
+func drawImg(geni int, thisGen *Generation) error {
 	f, err := os.Create(fmt.Sprintf("./images/%d.jpg", geni))
 	if err != nil {
 		return err
@@ -187,7 +193,7 @@ func drawimg(geni int, thisGen *Generation) error { //gridch chan *GridReq) erro
 // generations' bits for cycleDepth worth of generations.  It determines
 // if equilibrium has been reached, and life is just cycling.  If thisGen
 // is a dup of any one of the previous generations, then it is a dup.
-func isDup(thisGen *Generation) bool { //, prevGens []*Generation) bool {
+func isDup(thisGen *Generation, prevGens []*Generation) bool {
 	for i := uint(0); i < cycleDepth; i++ {
 		if prevGens[i] == nil {
 			continue
@@ -216,16 +222,16 @@ func main() {
 	flag.Var(&gc, "g", "grid color (default black)")
 	flag.Var(&cc, "z", "cell color (default green)")
 	flag.Parse()
-	cells = make([][]Cell, rows)
+	cells := make([][]Cell, rows)
 	for r := range cells {
 		cells[r] = make([]Cell, cols)
 	}
-	prevGens = make([]*Generation, cycleDepth)
+	prevGens := make([]*Generation, cycleDepth)
 	size := uint64(rows*cols) / 64 /* one bit per cell */
 	if size == 0 || size%64 != 0 {
 		size++
 	}
-	grid, thisGen := initialize(size) //, prevGens)
+	grid, thisGen := initialize(cells, &prevGens, size)
 	/*
 	 * unfortunately we can't just let the cells go wild. in order to
 	 * keep memory usage low, we have to keep them in lock-step with
@@ -238,12 +244,12 @@ func main() {
 				thisGen = <-cells[r][c].generations
 			}
 		}
-		if err := drawimg(i, thisGen); err != nil {
+		if err := drawImg(i, thisGen); err != nil {
 			fmt.Printf("drawimg: %s\n", err.Error())
 			break
 		}
 		/* stop if there's a duplicate image found in the cycle depth */
-		if isDup(thisGen) { //, prevGens) {
+		if isDup(thisGen, prevGens) {
 			break
 		}
 		prevGens = append([]*Generation{thisGen}, prevGens[:cycleDepth-1]...)
