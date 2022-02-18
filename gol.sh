@@ -2,6 +2,9 @@
 
 wc -l *.go *.js *.html
 go clean -i
+if [ ! -d images ]; then
+    mkdir images
+fi
 rm -rf images/*
 go build -race # test, install
 time go run gol.go -r 64 -c 64 -x 800 -y 800 -d 7
