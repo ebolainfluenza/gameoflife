@@ -14,8 +14,9 @@ import (
 )
 
 type Generation struct {
-	geni int      /* generation index */
-	bits []uint64 /* an array of bits large to hold this generation's grid */
+	geni  int         /* generation index */
+	bits  []uint64    /* an array of bits large to hold this generation's grid */
+	image *image.RGBA /* the drawn grid and cells */
 }
 
 type Cell struct {
@@ -24,11 +25,6 @@ type Cell struct {
 	neighbors   [8]*Cell
 	bounds      image.Rectangle
 	generations chan *Generation /* receive generation to run from the pump */
-}
-
-type GridReq struct {
-	geni  int              /* generation index */
-	imgch chan *image.RGBA /* accepts latest image, updates, then hands back */
 }
 
 type MyColor color.RGBA
@@ -58,7 +54,15 @@ func rc(cells [][]Cell, r, c int) *Cell { /* constrain in board: wrap */
 	return &cells[r][c]
 }
 
-func initialize(done chan int, gridch chan *GridReq, size uint64) *Generation { //, prevGens []*Generation, cells [][]Cell) *Generation {
+// emtpyGrid creates a new image with an empty grid on which to draw.
+func emptyGrid(grid *image.RGBA) *image.RGBA {
+	b := grid.Bounds()
+	img := image.NewRGBA(b)
+	draw.Draw(img, b, grid, ZP, draw.Src)
+	return img
+}
+
+func initialize(size uint64) (*image.RGBA, *Generation) { //, prevGens []*Generation
 	rh := (imgy - rows - 1) / rows
 	cw := (imgx - cols - 1) / cols
 	/* require 3 pixels for visibility's sake */
@@ -86,9 +90,9 @@ func initialize(done chan int, gridch chan *GridReq, size uint64) *Generation { 
 	draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, ZP, draw.Over)
 	draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Over)
 	y += 1
-	b := make([]byte, rows*cols)
-	io.ReadFull(rand.Reader, b)
-	thisGen := &Generation{bits: make([]uint64, size), geni: 0}
+	rndm := make([]byte, rows*cols)
+	io.ReadFull(rand.Reader, rndm)
+	thisGen := &Generation{geni: 0, bits: make([]uint64, size), image: emptyGrid(grid)}
 	cellno := uint(0)    /* 0 to (rows*cols)-1 */
 	bitsIndex := uint(0) /* index into the Generation.bits array */
 	for r := 0; r < rows; r++ {
@@ -109,11 +113,11 @@ func initialize(done chan int, gridch chan *GridReq, size uint64) *Generation { 
 			cell.generations = make(chan *Generation)
 			/* determine if this cell's bit is alive for the initial generation */
 			isAlive := false
-			if b[r*cols+c]&0xa == 0xa { /* arbitrary */
+			if rndm[r*cols+c]&0xa == 0xa { /* arbitrary */
 				thisGen.bits[cell.index] |= cell.mask
 				isAlive = true
 			}
-			go cell.live(biota, done, gridch, isAlive) //, prevGens)
+			go cell.live(biota, isAlive) //, prevGens)
 			x += cw
 			draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Over)
 			x += 1
@@ -123,8 +127,7 @@ func initialize(done chan int, gridch chan *GridReq, size uint64) *Generation { 
 		draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, ZP, draw.Over)
 		y += 1
 	}
-	go gridGen(grid, gridch)
-	return thisGen
+	return grid, thisGen
 }
 
 func (c *MyColor) Set(s string) error {
@@ -142,35 +145,14 @@ func (c *MyColor) String() string {
 		c.R, c.G, c.B, c.A)
 }
 
-// gridGen synchronizes the passing around of this generation's image.
-// only keeps one image, and verifies that it's the one requested.
-func gridGen(grid draw.Image, gridch chan *GridReq) {
-	var img *image.RGBA
-
-	geni := -1
-	b := grid.Bounds()
-	for req := range gridch {
-		if req.geni != geni { /* create a new generation's empty grid image */
-			img = image.NewRGBA(b)
-			draw.Draw(img, b, grid, ZP, draw.Src)
-			geni = req.geni
-		}
-		req.imgch <- img  /* pass this cell/drawimg() the latest grid */
-		img = <-req.imgch /* wait for this cell/drawimg() hand it back (optionally updated) */
-	}
-}
-
-func (cell *Cell) live(biota *image.RGBA, done chan int, gridch chan *GridReq, isAlive bool) { //, prevGens []*Generation) {
-	imgch := make(chan *image.RGBA)
-	for thisGen := range cell.generations {
-		gridch <- &GridReq{geni: thisGen.geni, imgch: imgch}
-		dest := <-imgch /* get the latest image on which to draw */
+func (cell *Cell) live(biota *image.RGBA, isAlive bool) { //, prevGens []*Generation) {
+	for thisGen := range cell.generations { /* get the latest image on which to draw */
 		pg := prevGens[0]
 		if pg != nil {
 			count := 0 /* of this cell's previous generation's alive neighbors */
-			for k := range cell.neighbors {
-				mask := cell.neighbors[k].mask
-				if pg.bits[cell.neighbors[k].index]&mask == mask {
+			for i := range cell.neighbors {
+				mask := cell.neighbors[i].mask
+				if pg.bits[cell.neighbors[i].index]&mask == mask {
 					count++
 				}
 			}
@@ -182,30 +164,21 @@ func (cell *Cell) live(biota *image.RGBA, done chan int, gridch chan *GridReq, i
 			}
 		}
 		if isAlive { /* 1st gen has no prevGen, but must still be drawn */
-			draw.Draw(dest, cell.bounds, biota, ZP, draw.Over)
+			draw.Draw(thisGen.image, cell.bounds, biota, ZP, draw.Over)
 		}
-		imgch <- dest /* return the image with this cell updated */
-		done <- thisGen.geni
+		cell.generations <- thisGen /* return the image with this cell updated */
 	}
-	close(imgch)
-	imgch = nil
 }
 
-func drawimg(geni int, gridch chan *GridReq) error {
+func drawimg(geni int, thisGen *Generation) error { //gridch chan *GridReq) error {
 	f, err := os.Create(fmt.Sprintf("./images/%d.jpg", geni))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	imgch := make(chan *image.RGBA)
-	gridch <- &GridReq{geni: geni, imgch: imgch}
-	pic := <-imgch /* get this generation's image */
-	if err = jpeg.Encode(f, pic, nil); err != nil {
+	if err = jpeg.Encode(f, thisGen.image, nil); err != nil {
 		return err
 	}
-	imgch <- pic /* must return the image */
-	close(imgch)
-	imgch = nil
 	f.Sync()
 	return nil
 }
@@ -215,7 +188,7 @@ func drawimg(geni int, gridch chan *GridReq) error {
 // if equilibrium has been reached, and life is just cycling.  If thisGen
 // is a dup of any one of the previous generations, then it is a dup.
 func isDup(thisGen *Generation) bool { //, prevGens []*Generation) bool {
-	for i := 0; i < len(prevGens); i++ {
+	for i := uint(0); i < cycleDepth; i++ {
 		if prevGens[i] == nil {
 			continue
 		}
@@ -247,14 +220,12 @@ func main() {
 	for r := range cells {
 		cells[r] = make([]Cell, cols)
 	}
-	done := make(chan int) /* each cell responds when generation done */
-	gridch := make(chan *GridReq)
 	prevGens = make([]*Generation, cycleDepth)
 	size := uint64(rows*cols) / 64 /* one bit per cell */
 	if size == 0 || size%64 != 0 {
 		size++
 	}
-	thisGen := initialize(done, gridch, size) //, prevGens, cells)
+	grid, thisGen := initialize(size) //, prevGens)
 	/*
 	 * unfortunately we can't just let the cells go wild. in order to
 	 * keep memory usage low, we have to keep them in lock-step with
@@ -264,13 +235,10 @@ func main() {
 		for r := 0; r < rows; r++ {
 			for c := 0; c < cols; c++ {
 				cells[r][c].generations <- thisGen
+				thisGen = <-cells[r][c].generations
 			}
 		}
-		/* wait for all cells to finish drawing themselves on the grid */
-		for j := 0; j < rows*cols; j++ {
-			<-done
-		}
-		if err := drawimg(i, gridch); err != nil {
+		if err := drawimg(i, thisGen); err != nil {
 			fmt.Printf("drawimg: %s\n", err.Error())
 			break
 		}
@@ -279,10 +247,8 @@ func main() {
 			break
 		}
 		prevGens = append([]*Generation{thisGen}, prevGens[:cycleDepth-1]...)
-		thisGen = &Generation{bits: make([]uint64, size), geni: i + 1}
+		thisGen = &Generation{geni: i + 1, bits: make([]uint64, size), image: emptyGrid(grid)}
 	}
-	close(done)
-	close(gridch)
 	for r := 0; r < rows; r++ {
 		for c := 0; c < cols; c++ {
 			close(cells[r][c].generations)
