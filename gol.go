@@ -37,7 +37,8 @@ var rows, cols = 64, 64                  /* default number of rows & columns in 
 var cycleDepth uint = 7                  /* default number of previous generations to check for duplicates of current */
 var ZP = image.Point{}                   /* the image Zero Point, both X & Y are 0 (constant) */
 
-func rc(cells [][]Cell, r, c int) *Cell { /* constrain in board: wrap */
+// rc determines the neighboring row/column: constrain in board (wrap)
+func rc(cells [][]Cell, r, c int) *Cell {
 	if r < 0 {
 		r = rows - 1
 	} else if r >= rows {
@@ -59,6 +60,8 @@ func emptyGrid(grid *image.RGBA) *image.RGBA {
 	return img
 }
 
+// initialize designs the empty grid, creates the first generation, and starts all
+// cells living.  It returns both the empty grid image and the first generation.
 func initialize(cells [][]Cell, prevGens *[]*Generation, bitsArrSize uint64) (*image.RGBA, *Generation) {
 	rh := (imgy - rows - 1) / rows
 	cw := (imgx - cols - 1) / cols
@@ -84,8 +87,8 @@ func initialize(cells [][]Cell, prevGens *[]*Generation, bitsArrSize uint64) (*i
 	draw.Draw(vline, vline.Bounds(), &image.Uniform{gridcolor}, ZP, draw.Src)
 	draw.Draw(grid, grid.Bounds(), &image.Uniform{bckgndcolor}, ZP, draw.Src)
 	x, y := xoff, yoff
-	draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, ZP, draw.Over)
-	draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Over)
+	draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, ZP, draw.Src)
+	draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Src)
 	y += 1
 	rndm := make([]byte, rows*cols)
 	io.ReadFull(rand.Reader, rndm)
@@ -116,19 +119,22 @@ func initialize(cells [][]Cell, prevGens *[]*Generation, bitsArrSize uint64) (*i
 			}
 			go cell.live(biota, prevGens, isAlive)
 			x += cw
-			draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Over)
+			draw.Draw(grid, image.Rect(x, yoff, x+1, imgy+yoff), vline, ZP, draw.Src)
 			x += 1
 			cellno++
 		}
 		y += rh
-		draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, ZP, draw.Over)
+		draw.Draw(grid, image.Rect(xoff, y, imgx+xoff, y+1), hline, ZP, draw.Src)
 		y += 1
 	}
 	return grid, thisGen
 }
 
 // MyColor.Set is a required function for the flags package.
-// MyColor.Set takes a hex-encoded string and sets the appropriate RGBA value.
+// MyColor.Set takes a base-N-encoded string and sets the appropriate RGBA value.
+// The base is implied by the string's prefix: 2 for "0b", 8 for "0" or "0o",
+// 16 for "0x", and 10 otherwise. Underscore characters are permitted as defined
+// by the Go syntax for integer literals.
 func (c *MyColor) Set(s string) error {
 	i64, err := strconv.ParseInt(s, 0, 32)
 	r := uint8(i64 >> 24 & 0xff)
@@ -168,7 +174,7 @@ func (cell *Cell) live(biota *image.RGBA, prevGens *[]*Generation, isAlive bool)
 			}
 		}
 		if isAlive { /* 1st gen has no prevGen, but must still be drawn */
-			draw.Draw(thisGen.image, cell.bounds, biota, ZP, draw.Over)
+			draw.Draw(thisGen.image, cell.bounds, biota, ZP, draw.Src)
 		}
 		cell.generations <- thisGen /* return the image with this cell updated */
 	}
