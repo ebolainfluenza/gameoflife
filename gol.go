@@ -15,7 +15,7 @@ import (
 
 type Generation struct {
 	geni  int         /* generation index */
-	bits  []uint64    /* an array of bits large to hold this generation's grid */
+	bits  []uint64    /* an array of bits to hold this generation's grid */
 	image *image.RGBA /* the drawn grid and cells */
 }
 
@@ -243,7 +243,7 @@ func main() {
 	 * keep memory usage low, we have to keep them in lock-step with
 	 * one another generationally, to keep track of this gen & prev gen.
 	 */
-	for i := 0; i >= 0; i++ { /* the pump */
+	for i := 0; i >= 0; i++ { /* the generation pump */
 		for r := 0; r < rows; r++ {
 			for c := 0; c < cols; c++ {
 				cells[r][c].generations <- thisGen
